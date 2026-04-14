@@ -1,0 +1,7 @@
+# FIXED
+
+obstacle_mode.o: ../obstacle_mode.c ../obstacle_mode.h ../robot_config.h
+
+../obstacle_mode.h:
+
+../robot_config.h:

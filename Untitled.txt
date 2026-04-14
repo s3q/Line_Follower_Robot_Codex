@@ -1,0 +1,628 @@
+LaunchPad‑only competition line follower for TI‑RSLK MAX with obstacles and ramps
+Executive summary
+A robust LaunchPad‑only line‑following robot for competition (MSP‑EXP432P401R / MSP432P401R, CCS+GCC, NoRTOS) is best designed as a prioritised finite‑state machine (FSM) with hard safety overrides, explicit confidence/persistence rules, and conservative fallbacks. This report presents a detailed, implementable design for the TI‑RSLK MAX platform using the standard sensor suite (8‑channel QTRX reflectance array, bump switches) plus IR distance, two ultrasonics, and optional IMU + encoders. The design is grounded in primary sources: the TI‑RSLK MAX user/kit documentation and curriculum labs (motor PWM and APIs, bump interrupts, line sensor geometry), Pololu QTR documentation, Sharp GP2Y0A21YK0F datasheets, HC‑SR04 ultrasonic datasheets, and multiple competition rule PDFs that explicitly include 90° corners, intersections, gaps, obstacles, and ramp features. 
+
+The core control policy is:
+
+Emergency (bump) → Obstacle (confirmed) → Ramp/tilt mode → Intersection policy → Line follow → Recovery/search → Failsafe stop
+
+This ordering matches both safety best practice (bump switches are collision truth and are intended to trigger edge interrupts on Port 4 with negative logic) and common competition constraints where ramps/hills must be traversed rather than avoided. 
+
+Key “competition‑winning” heuristics included here are:
+
+Persistence‑based classification to handle sensor noise, ultrasonic multipath, Sharp non‑linearity, and lighting variation. 
+Heading‑gated line re‑acquisition after obstacle bypass (prevents latching onto the “line you came from”). This is a practical adaptation of Bug‑family boundary‑following ideas paired with a “goal reacquire” gate. 
+Ramp detection via IMU pitch (preferred) with a no‑IMU fallback using “smooth symmetric range change” and stable line presence. 
+Dual‑ultrasonic scheduling with ≥60 ms measurement cycle (and alternation to reduce cross‑talk), as recommended by HC‑SR04 datasheets. 
+Platform context and sensor suite
+Functional constraints and timing model
+The TI‑RSLK curriculum explicitly encourages an FSM approach and notes that motors respond on the order of ~100 ms, suggesting an FSM update period around 50 ms for simple controllers; for competition you can typically run the controller faster (e.g., 10–20 ms) while keeping classification persistence windows that reflect sensor update rates. 
+
+Motor control on TI‑RSLK MAX uses Timer_A0 PWM at 100 Hz (10 ms period), with duty commands in the range 0..14998 (14‑bit‑like resolution), and standard movement APIs: Motor_Forward, Motor_Backward, Motor_Left, Motor_Right, Motor_Stop. These are the exact APIs and ranges you should use in your state actions. 
+
+Sensors and pins (TI‑RSLK MAX chassis board)
+Bump switches (front collision, negative logic, Port 4): P4.0, P4.2, P4.3, P4.5, P4.6, P4.7. The curriculum explicitly recommends edge‑triggered interrupts for collisions, and explains that with negative logic a falling edge indicates a collision. 
+
+8‑sensor line array (QTRX reflectance): QTR0..QTR7 map to P7.0..P7.7 with ordering documented (rightmost is P7.0, leftmost is P7.7). Emitters are controlled by P5.3 (CTRL EVEN) and P9.2 (CTRL ODD). TI’s lab materials also quantify the array width (~76.2 mm) and spacing (~9.53 mm) and propose a line position estimate around ±33.4 mm from centre. 
+
+IR distance (Sharp GP2Y‑class) analogue inputs on the chassis headers:
+
+Centre IR: P6.1 (DISTC)
+Left IR: P9.1 (DISTL) and auxiliary P6.3 (AUXL)
+Right IR: P9.0 (DISTR) and auxiliary P6.2 (AUXR) 
+Sharp GP2Y0A21YK0F‑class behaviour that matters for design: non‑linear output, typical update cycle on the order of tens of milliseconds (datasheet gives ~38 ms), and an effective range around 10–80 cm. 
+
+Two ultrasonics (typical HC‑SR04 modules): not part of the base kit, but commonly added using chassis board 5 V and spare GPIO/timer capture pins. HC‑SR04 requires 5 V, uses a ≥10 µs trigger pulse, returns distance via echo pulse width, suggests >60 ms measurement cycles, and has a ~15° measuring angle in the common datasheet. 
+
+Important electrical constraint: TI course materials explicitly warn that MSP432 pins are not 5 V tolerant; therefore HC‑SR04 echo (5 V TTL) must be level‑shifted (simple divider is fine) before connecting to MSP432 GPIO/timer input capture. 
+
+Optional IMU and encoders:
+
+I²C is available on P6.4 (SDA) and P6.5 (SCL) on the chassis headers for IMU expansion. 
+Gear motor + encoder assemblies are part of the TI‑RSLK MAX kit. 
+
+For IMU orientation/pitch estimation, the Madgwick filter is a widely used, computationally light option suitable for microcontrollers. 
+Sensor placement recommendations with diagrams
+The TI‑RSLK MAX mechanical design already places the reflectance array and bumpers correctly; your competitive advantage comes from aiming/height/shrouding and adding the two ultrasonics in a placement that supports bypass decisions. Assembly guidance confirms the bumper boards mount at the front curved end, and the line sensor mounts underside and forward‑oriented. 
+
+Pololu guidance for QTR arrays recommends close standoff (application note example at ~1/8″) and highlights that reflectance depends on geometry and ambient light; competition rulebooks also warn lighting can vary, reinforcing the need for a simple shroud. 
+
+Recommended placements and angles
+Line array (QTRX):
+
+Mount underside, near the front, ~3 mm from the surface (TI lab example uses 3 mm). 
+Add a black foam/plastic shroud skirt (non‑reflective) to reduce ambient light sensitivity. 
+Bump switches:
+
+Leave as designed (front arc). Use them as collision truth; do not use them as a “soft obstacle detector”. 
+Centre IR (P6.1):
+
+Point straight forward, approximately level, height such that it sees obstacle faces rather than floor texture. Use it for near‑to‑medium range confirmation where ultrasonics can be ambiguous with small/angled targets. Sharp triangulation sensors are relatively robust to reflectivity variation compared with pure intensity sensors, but still require calibration. 
+Left/right IR (P9.1/P9.0, AUXL/AUXR):
+
+If using Sharp sensors: mount slightly outward (±15° to ±30°) to provide “clearance” cues during bypass selection. If you instead use OPT3101 ToF modules, mount similarly but expect different range/behaviour. 
+Two ultrasonics (HC‑SR04 style):
+
+Place at the front left and front right corners on the top deck, roughly level, angled slightly outward (±15° to ±25°). This gives:
+a “front obstacle” signal via min(distL, distR)
+a bypass side choice via comparing left vs right clearance
+a crude “object width” estimate via how long each sensor remains blocked during a sweep. 
+Do not mount pointing down; on ramps the floor can dominate returns and create false positives. Use ramp classification to suppress these. 
+IMU: mount near centre of mass on the chassis board (minimise vibration and rotational acceleration). Use it primarily for pitch (ramp) and relative yaw change during avoidance reacquisition gating. 
+
+Mermaid placement diagrams
+Top‑down conceptual layout
+
+mermaid
+Copy
+flowchart TB
+    subgraph FRONT[Front of robot]
+      B[Bump arc (P4.0,P4.2,P4.3,P4.5,P4.6,P4.7)]
+      USL[Ultrasonic L (5V, trig/echo -> GPIO+capture)]
+      USCen[Centre IR distance (P6.1)]
+      USR[Ultrasonic R (5V, trig/echo -> GPIO+capture)]
+    end
+
+    subgraph MID[Mid / underside]
+      QTR[8x line array QTR0..QTR7 (P7.0..P7.7)\nEmitters: P5.3 (even), P9.2 (odd)]
+      IRL[Left distance: DISTL P9.1 / AUXL P6.3]
+      IRR[Right distance: DISTR P9.0 / AUXR P6.2]
+    end
+
+    subgraph BODY[Body]
+      IMU[Optional IMU (I2C P6.4 SDA, P6.5 SCL)]
+      ENC[Optional encoders (wheel tach)]
+    end
+
+    USL -->|clearance| BODY
+    USR -->|clearance| BODY
+    USCen -->|confirm obstacle| BODY
+    QTR -->|primary path| BODY
+    B -->|emergency| BODY
+Side view conceptual layout
+
+Track surface + line
+
+QTRX line array ~3mm above surface
+
+Chassis
+
+Centre IR pointed forward
+
+Ultrasonics pointed forward, slight outward yaw
+
+Obstacle face
+
+
+
+Show code
+Pololu Chassis Kit for TI-RSLK MAX - Opencircuit
+Pololu 8-Channel QTRX Sensor Array for Romi/TI-RSLK MAX (Headers not Soldered) - RobotShop
+Ultrasonik Sensör Montaj Aparatı Tip A - Servo Uyumlu - Pan Satın Al
+💎 Resources — Embedded Computer Systems I
+Right Bumper Switch Assembly for Romi/TI-RSLK MAX (Through-Hole Pins Soldered) at MG Super Labs India
+TI Robotic Systems Learning Kit (TI-RSLK) - Review - element14 Community
+
+Prioritised behaviour rules and signal processing
+Behaviour priority and why it matches real competitions
+Competition rule PDFs that include obstacles and intersection structures regularly require:
+
+handling sharp corners (≥90°) 
+handling line gaps (~10 cm) not on a curve 
+detouring around an obstacle and returning to the line shortly afterwards 
+traversing ramps/hills; in RoboCup Junior Rescue Line rules, ramps explicitly exist and the line along ramps can include gaps/intersections/obstacles, which means you must keep line logic active on ramps. 
+Therefore the recommended priority is:
+
+Emergency bump (ISR‑latched) → Obstacle confirmed (multi‑sensor) → Ramp mode (pitch/tilt) → Intersection policy → Nominal line follow → Recovery/search → Failsafe stop
+
+The curriculum explicitly frames bump collision as an edge‑triggered interrupt task, and notes negative logic implies falling edges signify collision. 
+
+Canonical signals computed every control tick
+Keep these computations central (e.g., in control.c) so all states use the same measured variables.
+
+Line features
+
+qtrRaw[8] and qtrNorm[8] (calibrated 0..1000 recommended)
+lineMask (8‑bit) where bit i=1 indicates “on line” under sensor i
+lineCount = popcount(lineMask)
+linePos (recommended as 0..7000 with centre 3500, consistent with common QTR line‑position APIs) 
+lineErr = linePos - 3500 (signed)
+Bump
+
+bumpMask6 from Port 4 inputs (pressed = 0, invert to 1), plus bumpZone (LEFT/CENTRE/RIGHT/MULTI)
+bumpEdgeLatched set in ISR
+Sharp IR distance (centre/left/right)
+
+irC_mm, irL_mm, irR_mm computed by calibration or conversion. TI’s lab materials provide an explicit framework for converting ADC readings into mm and managing maximum distance conditions. 
+irC_conf, etc., confidence counters after filtering
+Ultrasonics (two sensors)
+
+usL_cm, usR_cm, plus raw usEcho_us times
+trigger alternation scheduling with >=60 ms cycle to reduce false echoes and cross‑talk, as recommended in typical datasheets. 
+Optional IMU + encoders
+
+pitch_deg, pitch_rate, (optional) yaw_deg or yaw_delta for reacquisition gating; Madgwick is a suitable low‑cost filter. 
+encL, encR, and vL, vR for speed normalisation and “progress detection” (detect stuck/spin). 
+Filtering and persistence (minimum viable)
+IR Sharp: moving average over 3–5 samples, because behaviour is non‑linear and update is not instantaneous. 
+Ultrasonic: median of the last 3 (per sensor) is often more robust than mean due to multipath spikes; enforce >60 ms between triggers. 
+Line: compute lineMask from normalised values with per‑sensor thresholds; use hysteresis for stable lineCount classification. TI instructs measuring all eight sensors and controlling emitters on P5.3/P9.2. 
+Implementable FSM design and state transitions
+State list and responsibilities
+Keep this in your existing architecture: a single Control_Update() evaluates priority, updates the FSM state, and issues motor commands via the TI motor API (Motor_Forward, Motor_Left, etc.). 
+
+Recommended states:
+
+CALIBRATE (once at start or on command)
+FOLLOW_LINE (PID/PD steering, speed tiers)
+INTERSECTION_LOCK (policy: go straight unless rule says otherwise)
+WIDE_LINE_STABILISE (thick line / corridor mode)
+GAP_BRIDGE (drive straight briefly across gaps)
+RAMP_TRAVERSE (slow, stable line following with ramp classifier active)
+OBSTACLE_APPROACH_CONFIRM (slow/stop and confirm multi‑sensor)
+OBSTACLE_BYPASS (detour manoeuvre or boundary following using US+IR)
+LINE_REACQUIRE_GATED (heading‑gated reacquire; reject “rear” line)
+RECOVER_SEARCH (lost line; biased search using last known side)
+EMERGENCY_BUMP (latched bump; backoff and transition into avoidance)
+FAILSAFE_STOP (no progress, unrecoverable)
+State transition chart (Mermaid)
+calib_done
+
+bump_edge_latched
+
+obstacle_suspect && !ramp_conf_high
+
+ramp_conf_high
+
+intersection_conf_high
+
+wide_line_conf_high
+
+gap_conf_high
+
+line_lost_conf_high
+
+backoff_complete
+
+obstacle_conf_high
+
+obstacle_conf_low
+
+ramp_exit_conf
+
+intersection_exit_conf
+
+width_normalised
+
+line_reacquired
+
+gap_timeout
+
+bypass_clear
+
+line_reacquired_forward
+
+reacquire_timeout
+
+line_reacquired
+
+recover_timeout
+
+CALIBRATE
+
+FOLLOW_LINE
+
+EMERGENCY_BUMP
+
+OBSTACLE_APPROACH_CONFIRM
+
+RAMP_TRAVERSE
+
+INTERSECTION_LOCK
+
+WIDE_LINE_STABILISE
+
+GAP_BRIDGE
+
+RECOVER_SEARCH
+
+OBSTACLE_BYPASS
+
+LINE_REACQUIRE_GATED
+
+FAILSAFE_STOP
+
+
+
+Show code
+Exhaustive case playbook with entry conditions, actions, timeouts, fusion, tuning, diagnostics
+This section provides the “per case” requirements you asked for. To keep the design implementable, the cases are grouped, but each case still includes: (1) state, (2) entry conditions with thresholds and persistence, (3) control actions using TI motor APIs and duty ranges, (4) timeouts/recovery, (5) fusion + confidence rules using line, IR, 2× ultrasonic, bump, IMU, encoders, (6) tuning constants with initial values and ranges, (7) diagnostics to expose.
+
+Shared tuning constants (baseline table)
+All duty values assume TI’s standard PWM period = 15000 ticks at 100 Hz with duty 0..14998. 
+
+Constant	Initial	Range	Notes / source anchor
+PWM_MAX	14998	fixed	TI motor lab API range. 
+DUTY_FAST	8500	7000–11000	Only when well centred and no hazards.
+DUTY_CRUISE	7000	5000–9000	Default follow speed.
+DUTY_SLOW	4500	3000–6500	Tight turns, intersection lock, ramps.
+DUTY_PIVOT	5000	4000–8000	For Motor_Left/Right pivot‑like turns. TI example uses ~5000 for 90° tuning. 
+DUTY_BACKOFF	5000	3500–7500	Backoff after bump/too close.
+CONTROL_TICK_MS	10–20	10–50	Controller tick; classification uses persistence. TI notes 50 ms FSM for simple tracker. 
+CLASSIFY_TICK_MS	40–60	40–100	Match Sharp update (~38 ms) and ultrasonic cycle (>60 ms). 
+QTR_LINE_THR	500	350–650	On 0..1000 normalised scale; use per‑sensor derived thresholds. 
+LINE_LOST_N	2	1–4	Consecutive ticks lineCount==0 to declare loss.
+GAP_N	2	1–4	Gap confirm ticks (only if pre‑gap error small).
+GAP_MAX_MS	250	150–600	Must cover typical 10 cm gap at speed (various rules). 
+INTERSECT_COUNT_THR	6	5–8	Sensors on simultaneously to suspect intersection.
+INTERSECT_N	3	2–6	Persistence for intersection.
+INTERSECT_LOCK_MS	250	150–450	Drive straight through.
+US_CYCLE_MS	70	60–120	HC‑SR04 suggests >60 ms measurement cycle. 
+OBS_STOP_CM	18	12–30	Confirmed obstacle stop threshold.
+OBS_WARN_CM	28	20–45	Pre‑slow warning threshold.
+OBS_CONFIRM_N	2	2–5	Persistence across classify ticks to confirm.
+PITCH_ENTER_DEG	8	5–15	Ramp detect (IMU). Ramps can be steep (e.g., 25° in rules). 
+PITCH_EXIT_DEG	4	2–10	Hysteresis for ramp exit.
+BACKOFF_MS	180	100–400	After bump or too close.
+RECOVER_TIMEOUT_MS	2000	1000–6000	Stop if line cannot be recovered.
+
+Standard diagnostics set (expose in CCS watch)
+Use a volatile global struct dbg and update it once per tick:
+
+dbg.state, dbg.stateTimeMs, dbg.priorityReason
+dbg.qtrNorm[8], dbg.lineMask, dbg.lineCount, dbg.linePos, dbg.lineErr, dbg.lastLineSide
+dbg.bumpMask6, dbg.bumpZone, dbg.bumpLatched
+dbg.irC_mm, dbg.irL_mm, dbg.irR_mm, dbg.irConfC/L/R
+dbg.usL_cm, dbg.usR_cm, dbg.usValidL/R, dbg.usAgeMsL/R
+dbg.pitch_deg, dbg.yaw_delta (if IMU), dbg.rampConf
+dbg.encL, dbg.encR, dbg.noProgressCounter (if encoders)
+dbg.baseDuty, dbg.corr, dbg.leftDutyCmd, dbg.rightDutyCmd
+dbg.intersectConf, dbg.gapConf, dbg.obsConf
+Line following cases
+Case: straight line
+
+State: FOLLOW_LINE
+Entry: lineCount ∈ [1..3] AND abs(lineErr) < E_CENTER for N_CENTER=3 ticks AND obsConf==0 AND rampConf==0
+Action: Motor_Forward(leftDuty, rightDuty) with base=DUTY_FAST; corr = Kp*err + Kd*(err-errPrev); clamp duties to [DUTY_SLOW..DUTY_FAST]. Motor API and duty ranges are per TI lab. 
+Timeout: none
+Fusion: if min(usL,usR) < OBS_WARN_CM OR irC_mm < WARN_MM then reduce base to DUTY_CRUISE even before obstacle confirm; require persistence because ultrasonic and Sharp timing. 
+Tune: E_CENTER initial ~300 (if 0..7000 scale), Kp ~ 0.8–1.8, Kd ~ 2–8 (scaled to your integer math), DUTY_FAST 7k–11k
+Diagnostics: lineErr, baseDuty, corr, usL/usR, irC_mm
+Case: gentle curve left/right
+
+State: FOLLOW_LINE
+Entry: lineCount ∈ [2..5] AND abs(lineErr) moderate (between E_CENTER and E_SHARP) for ≥2 ticks
+Action: keep PD steering but drop base to DUTY_CRUISE, optionally gain‑schedule: increase Kp slightly as abs(err) rises
+Timeout: none
+Fusion: if IMU pitch indicates ramp (pitch > PITCH_ENTER_DEG) transition to RAMP_TRAVERSE (do not treat as obstacle). Ramps exist and can be steep in some rulesets. 
+Tune: E_SHARP initial ~1200–1600; DUTY_CRUISE
+Diagnostics: pitch_deg, rampConf
+Case: sharp turn (but not a pure 90°)
+
+State: FOLLOW_LINE (high‑curvature mode)
+Entry: abs(lineErr) >= E_SHARP AND lineCount > 0 for N=2
+Action: base=DUTY_SLOW; allow larger corr clamp; if you saturate one wheel at DUTY_MIN hold there briefly to carve the corner
+Timeout: if abs(err) saturates for SAT_MS (e.g., 400–700 ms) without improvement, escalate to RECOVER_SEARCH (treat as 90°/lost)
+Fusion: if min(usL,usR) becomes very small suddenly, re‑evaluate obstacle vs ramp: obstacle confidence requires agreement (US + IR or bump). 
+Tune: SAT_MS, DUTY_SLOW, corr clamp
+Diagnostics: errPrev, satTimer, obsConf
+Case: true 90° turn left/right (explicit in many rules) 
+
+State: RECOVER_SEARCH (corner‑aware)
+Entry: pattern transition: within ≤3 ticks you see lineCount drop to 0 or 1 and remaining bits are at an extreme end; store lastLineSide
+Action: pivot search biased to lastLineSide using Motor_Left(DUTY_PIVOT,DUTY_PIVOT) or Motor_Right(...) until lineCount>=1 AND abs(err) < E_RECOVER_EXIT for 2 ticks
+Timeout: SWEEP_MS ≈ 800–1400 ms; if not found, reverse slightly then sweep opposite direction; if still not found, FAILSAFE_STOP
+Fusion: use encoders or yaw delta to limit to ~180° sweep; if you see line but yaw is ~180° from entry heading, accept (this is corner), unlike obstacle reacquire where you may reject rear line
+Tune: DUTY_PIVOT, SWEEP_MS, E_RECOVER_EXIT
+Diagnostics: lastLineSide, yaw_delta, sweepPhase
+Case: intersection cross, T, or +
+Competition rules often constrain intersection behaviour; several rulebooks specify intersections are right‑angle and/or add forks and crossings. 
+
+State: INTERSECTION_LOCK
+Entry: lineCount >= INTERSECT_COUNT_THR for INTERSECT_N consecutive ticks
+Action: drive straight for INTERSECT_LOCK_MS using Motor_Forward(DUTY_SLOW,DUTY_SLOW) and freeze steering (or clamp corr tightly) to avoid hooking onto the perpendicular branch
+Timeout: if line returns to normal early, continue lock until timer expires (prevents branch capture at exit)
+Fusion: if obstacle confirmed during lock (US+IR or bump), abort lock into obstacle logic; intersections are not an excuse to hit obstacles
+Tune: INTERSECT_COUNT_THR, INTERSECT_N, INTERSECT_LOCK_MS
+Diagnostics: intersectConf, lockRemainingMs
+Case: wide/thick line (not an intersection)
+Rulebooks explicitly allow thickening of line and variable width. 
+
+State: WIDE_LINE_STABILISE
+Entry: lineCount elevated (e.g., 4–6) but mask is mostly contiguous and does not persist as intersection (INTERSECT_N not met)
+Action: reduce speed (DUTY_SLOW), use centroid from analogue qtrNorm[] rather than binary mask; soften steering
+Timeout: if persists > WIDE_MS (e.g., 700–1200 ms) reclassify as intersection or corridor/double‑line
+Fusion: lighting changes can mimic width; track average reflectance and require pattern coherence
+Tune: WIDE_MS
+Diagnostics: avgReflect, lineCount, maskContiguousScore
+Case: gap in line (bridge across)
+Multiple rule PDFs specify ~10 cm gaps on straight sections and that driving straight should reach the next segment. 
+
+State: GAP_BRIDGE
+Entry: lineCount==0 for GAP_N ticks AND prior to loss abs(err) < E_CENTER for ≥3 ticks AND curvature low
+Action: Motor_Forward(DUTY_CRUISE,DUTY_CRUISE) with steering disabled or heavily clamped
+Timeout: GAP_MAX_MS; if not reacquired → RECOVER_SEARCH
+Fusion: if obstacle suddenly appears in front during gap (US or IR), treat obstacle (priority). If pitch shows ramp, consider RAMP_TRAVERSE instead of gap if line likely continues on ramp. 
+Tune: GAP_MAX_MS depends on speed; start 250 ms
+Diagnostics: gapConf, gapTimer
+Case: inverted colours (white line on black)
+Some competitions include a short inverted‑colour segment and require adaptation. 
+
+State: FOLLOW_LINE with linePolarity flag
+Entry: mean/median of qtrNorm[] indicates “mostly black background” for > INV_N ticks AND a narrow bright ridge exists
+Action: swap interpretation (use a “white line” position calculation equivalent to readLineWhite) 
+Timeout: exit when normal contrast persists
+Fusion: do not flip polarity during ramps unless confirmed; ramps can change reflectance due to angle/lighting
+Tune: INV_N 3–8 ticks and hysteresis thresholds
+Diagnostics: linePolarity, avgReflect, polarityConf
+Case: double line / corridor
+Some rules define “double line” sections (two parallel lines). 
+
+State: WIDE_LINE_STABILISE (corridor submode)
+Entry: mask shows two separated clusters of “black” bits for ≥ DBL_N ticks
+Action: target centre between clusters (centroid calculation naturally does this if both clusters are weighted)
+Timeout: if corridor persists unexpectedly long, keep slow to avoid oscillation
+Fusion: ultrasonics can help if corridor coincides with walls/objects; but line remains primary
+Tune: DBL_N 2–4
+Diagnostics: clusterCount, clusterCentres
+Ramp and “follow line on ramp” cases
+Ramps/hills are common (and can be steep); RoboCup rules explicitly allow the line on ramps to include gaps, intersections, obstacles, and debris—so ramp mode must not disable other classifiers; it should change speed and thresholds. 
+
+Case: ramp up
+
+State: RAMP_TRAVERSE
+Entry: IMU pitch pitch_deg > PITCH_ENTER_DEG for RAMP_N=3 classify ticks AND lineCount>0 (line present)
+Action: keep same line PD controller but reduce speed: base = DUTY_SLOW and optionally scale base *= RAMP_FACTOR (0.5–0.85). Use Motor_Forward. 
+Timeout: exit when pitch_deg < PITCH_EXIT_DEG for EXIT_N=4 and line returns to normal statistics
+Fusion: ramp confidence requires (pitch high) AND (line present). Obstacle confidence can still override if US+IR both claim near AND persistence is met. 
+Tune: PITCH_ENTER_DEG 5–15°, RAMP_FACTOR 0.5–0.85, EXIT_N 3–6
+Diagnostics: pitch_deg, rampConf, baseDuty
+Case: ramp down
+
+State: RAMP_TRAVERSE
+Entry: pitch negative less than -PITCH_ENTER_DEG AND line present
+Action: reduce speed even more if overshoot occurs; clamp steering to avoid “snap turns” at bottom transition
+Timeout: as above
+Fusion: ultrasonics may see floor; suppress obstacle suspicion from ultrasonics alone while rampConf is high (require IR or bump to confirm)
+Tune: separate RAMP_DOWN_FACTOR if needed (0.45–0.75)
+Diagnostics: usL/usR vs irC_mm divergence
+Case: “ramp is not an obstacle” false positive
+
+State: RAMP_TRAVERSE keeps priority over OBSTACLE_APPROACH_CONFIRM when rampConf high
+Entry: rampConf high AND us distances shorten smoothly while irC_mm does not show a hard near obstacle AND bump not hit
+Action: stay in ramp mode; do not bypass
+Timeout: if IR and US both stay near for OBS_CONFIRM_N and bump hits, override into obstacle/bump logic
+Fusion: “smooth + symmetric” (usL≈usR and/or irL≈irR change) is a strong ramp cue; “sudden + asymmetric” is obstacle cue
+Tune: symmetry threshold e.g., abs(usL-usR) < 8 cm while rampConf building
+Diagnostics: rampConf, obsConf, symmetryMetric
+Obstacle avoidance cases (front/side, near line, object size, reacquire gating)
+Competitions define obstacles of fixed size and require detour + rejoin soon after (examples: brick obstacles around 25 cm long; reacquire within a limited distance such as 30 cm in some rulesets). 
+
+The design below is a Bug‑family inspired boundary‑following approach: when motion toward the “goal” (the line ahead) is blocked, perform a boundary follow until a rejoin condition is met. Lumelsky & Stepanov provide the classical non‑heuristic “Bug” strategy framework; TangentBug extends the idea explicitly for range sensors. We use a simplified, implementable variant suitable for MSP432 and two ultrasonics + IR. 
+
+Multi‑sensor obstacle confidence rule (recommended)
+Define obsConf as an integer accumulator updated every classify tick (40–60 ms):
+
+Add +2 if min(usL_cm, usR_cm) < OBS_STOP_CM
+Add +2 if irC_mm < IR_STOP_MM (converted) 
+Add +4 if bump latched (collision truth) 
+Subtract 1 each tick if none of the above hold
+Declare obstacle confirmed when obsConf >= OBS_CONF_THR (e.g., 4–6) for OBS_CONFIRM_N ticks. This prevents a single noisy ultrasonic reading or Sharp non‑linearity glitch from triggering an avoidance. 
+
+Case: obstacle front, detected early (no bump yet)
+
+State: OBSTACLE_APPROACH_CONFIRM
+Entry: min(usL,usR) < OBS_WARN_CM OR irC_mm < IR_WARN_MM for ≥2 classify ticks AND rampConf not high
+Action: slow with Motor_Forward(DUTY_SLOW,DUTY_SLOW); if becomes confirmed then Motor_Stop() and transition
+Timeout: if obstacle disappears for 3 ticks, return to FOLLOW_LINE
+Fusion: require agreement (US and IR) or persistence; ultrasonics can miss angled surfaces; Sharp can saturate near/reflectivity edge cases
+Tune: OBS_WARN_CM, IR_WARN_MM, OBS_CONFIRM_N
+Diagnostics: obsConf, usL/usR, irC_mm
+Case: obstacle contact (centre bump)
+
+State: EMERGENCY_BUMP
+Entry: bump falling edge latched (negative logic) 
+Action: Motor_Stop() immediately, then Motor_Backward(DUTY_BACKOFF,DUTY_BACKOFF) for BACKOFF_MS, then stop and enter OBSTACLE_BYPASS
+Timeout: if repeated bumps during backoff, increase backoff time and lower duty
+Fusion: bump overrides all; obstacle is now confirmed regardless of US/IR
+Tune: BACKOFF_MS, DUTY_BACKOFF
+Diagnostics: bumpMask6, bumpZone, backoffRemainingMs
+Case: obstacle contact (left or right bump zone)
+
+State: EMERGENCY_BUMP → OBSTACLE_BYPASS
+Entry: bump zone LEFT or RIGHT (computed from bump mask mapping)
+Action: stop, backoff, then bias bypass direction away from the struck side
+Timeout: as above
+Fusion: use ultrasonics to verify which side is more open before committing
+Tune: bump zone mapping and bias weights
+Diagnostics: chosenBypassSide, usL/usR
+Bypass strategy options (choose one, both are implementable)
+Option A: deterministic “detour rectangle” (minimal sensing)
+Works even if ultrasonics are unreliable in a noisy hall; it relies on timing/encoders and reacquire search.
+
+Option B: boundary following using the two ultrasonics as “side distance” sensors
+More adaptive; works better when obstacle sizes vary, but requires reliable ultrasonic geometry.
+
+A competition‑robust approach is: Option A as baseline, but extend the “forward clear” phase using sensor evidence (Option A + sensor extension).
+
+Detour rectangle with sensor‑extended “object size” estimate
+Case: obstacle on/near the line, bypass and rejoin
+
+State: OBSTACLE_BYPASS
+Entry: obstacle confirmed and robot stopped
+Action sequence (A‑baseline):
+Step 0: Motor_Stop() (100–200 ms settle)
+Step 1: backoff (Motor_Backward) for BACKOFF_MS
+Step 2: pivot to bypass side (Motor_Left or Motor_Right) for PIVOT_MS (tunes ~90°)
+Step 3: drive forward (Motor_Forward) for CLEAR_MS
+Step 4: counter‑pivot back (Motor_Right/Motor_Left) for PIVOT_MS_2
+Step 5: go to LINE_REACQUIRE_GATED
+Motor actions and duty usage follow TI’s driver. 
+Timeouts: each step has a max time; total bypass timeout ~3–6 s
+Fusion (“size estimate”): in Step 3, extend forward time while min(usL,usR) remains below OBS_CLEAR_CM OR irC_mm < IR_CLEAR_MM. This uses sensors to estimate how long the obstacle still blocks the forward path. 
+Tune:
+PIVOT_MS: start 250–600 ms (depends on battery and traction); TI suggests tuning 90° turns around these magnitudes in motor labs. 
+CLEAR_MS: start 400–1200 ms
+OBS_CLEAR_CM: 30–50 cm
+Diagnostics: avoidStep, stepTimer, clearExtendCounter, frontMinRange
+Boundary following with two ultrasonics (Bug‑style around obstacle)
+Use the two front‑corner ultrasonics angled outward, plus centre IR for short‑range confirmation. This approximates “wall following” control (maintain distance to obstacle boundary) without adding extra side sensors. Wall‑following control is a well‑studied reactive behaviour; fuzzy and other controllers are common, but a PD distance controller is sufficient for this scale. 
+
+Case: obstacle bypass by right‑hand boundary follow (mirror for left)
+
+State: OBSTACLE_BYPASS (boundary mode)
+Entry: obstacle confirmed; choose right bypass if usR > usL at stop (more clearance on right)
+Action:
+Maintain a target side distance D_SIDE_CM (e.g., 12–20 cm) using the right ultrasonic:
+sideErr = usR_cm - D_SIDE_CM
+corr = Kp_side*sideErr + Kd_side*(sideErr - prevSideErr)
+Command a gentle arc forward: Motor_Forward(base-corr, base+corr) with base=DUTY_SLOW
+If front becomes blocked again (min(usL,usR) < OBS_STOP_CM), increase turn away from obstacle boundary (tighten arc)
+Timeouts: boundary follow ends when rejoin conditions met (below) or AVOID_TIMEOUT_MS exceeded
+Fusion:
+Use centre IR to reject phantom ultrasonic returns: “blocked” only if IR also indicates close OR bump hit. 
+On ramps, keep this available: RoboCup rules explicitly allow obstacles on ramps in some formats, so obstacle logic must still function even during rampConf. 
+Tune: D_SIDE_CM, Kp_side, Kd_side, AVOID_TIMEOUT_MS
+Diagnostics: sideErr, corrSide, usR_cm, irC_mm
+Line reacquisition gating (prevents taking the “same line you came from”)
+This directly addresses your requirement: after bypass, do not reattach to the backward line segment.
+
+The simplest reliable mechanism is to record an “entry heading” and only accept reacquired line masks when the robot’s heading is consistent with forward progress; this is aligned with Bug‑style navigation’s idea of a progress measure and is implementable with an IMU yaw delta or encoder‑based heading estimate. 
+
+Case: reacquire line after bypass, forward‑only
+
+State: LINE_REACQUIRE_GATED
+Entry: bypass is “clear” (frontMinRange above OBS_CLEAR_CM for ≥2 ticks) AND lineCount==0
+Action: do a slow sweep while moving forward slightly:
+Motor_Left(DUTY_PIVOT,DUTY_PIVOT) for small increments (e.g., 50–80 ms), interleave with Motor_Forward(DUTY_SLOW,DUTY_SLOW) for 50–100 ms
+Evaluate line each tick
+Timeout/recovery:
+First sweep window targets ±90° around expected forward direction (≈180° coverage). If no acceptable line found, perform a secondary sweep (wider or reverse and retry). If still none → RECOVER_SEARCH.
+Fusion acceptance rule (the key):
+Accept line only if:
+lineCount>0 for ACCEPT_N=3 ticks AND abs(lineErr) < E_ACCEPT (stable)
+AND heading gate passes: abs(yaw_delta_from_entry) < YAW_ACCEPT_DEG (e.g., 70–110°)
+Reject if the line is detected while yaw_delta_from_entry is near 180° (meaning you are facing backwards; likely reacquiring the line behind you).
+Tune: YAW_ACCEPT_DEG, ACCEPT_N, E_ACCEPT
+Diagnostics: entryYaw, yawNow, yawDelta, lineAcceptRejectReason
+If you do not have IMU yaw, approximate heading from wheel encoder differential; it is less precise but sufficient for “forward vs backward” gating on short manoeuvres.
+
+Recovery and failure cases
+Case: line lost (not a gap)
+
+State: RECOVER_SEARCH
+Entry: lineCount==0 for LINE_LOST_N ticks AND gap conditions not met
+Action: biased search: if lastLineSide==LEFT, pivot left; else pivot right; interleave short forward nudges to avoid spinning in place
+Timeout: RECOVER_TIMEOUT_MS then FAILSAFE_STOP
+Fusion: if obstacle signals become strong during search, switch to obstacle confirm; if bump triggers, emergency overrides
+Tune: RECOVER_TIMEOUT_MS, sweep timing, pivot duty
+Diagnostics: recoverPhase, recoverTimer, lastLineSide
+Case: sensor failure (stuck QTR channel, saturated IR, ultrasonic invalid)
+
+State: affects all states via healthMask
+Entry: calibration span too small (min/max nearly equal) OR runtime variance near zero for long periods
+Action: ignore failed channels in centroid; reduce speed; if too many channels fail, stop safely
+Timeout: immediate failsafe if localisation becomes impossible
+Fusion: if ultrasonics invalid (no echo), rely on IR + bump; if IR saturates, rely on ultrasonics + bump
+Tune: calibration span thresholds, invalid counters
+Diagnostics: qtrHealthMask, usValidL/R, irSaturationFlags
+Case: motor asymmetry (drift) and oscillation/overshoot
+
+State: FOLLOW_LINE (tuning loop)
+Entry: persistent bias in lineErr on straight; sign‑flip oscillations at steady speed
+Action:
+add trim trimLeft, trimRight (scale factors)
+reduce DUTY_FAST until stable
+increase derivative (damping) and/or reduce proportional gain
+Timeout: none; it is tuning‑driven
+Fusion: use encoders to detect mean speed mismatch and correct scaling; use line error variance as metric
+Tune: trim range ±10–20%
+Diagnostics: trimL/trimR, errVar, encoderDiff
+Case: multi‑bump collision
+
+State: EMERGENCY_BUMP
+Entry: more than one bump bit set (multiple switches pressed)
+Action: stronger stop, longer backoff, then choose bypass side by clearance (usL vs usR)
+Timeout: if repeated collisions, stop and wait (failsafe)
+Fusion: multi‑bump implies head‑on or wedged; rely on backoff + boundary follow logic
+Tune: MULTI_BACKOFF_MS 250–600 ms
+Diagnostics: bumpMask6, bumpPopcount
+Implementation checklist and per‑state test procedures
+Implementation checklist (actionable, minimal architecture change)
+Confirm TI‑RSLK MAX pin mapping for QTR, bump, and IR distance headers using the chassis board pinout and TI user guide. 
+Implement motor driver calls using the TI Lab 13 motor API signatures and duty range (0..14998). 
+Add bump edge interrupts on Port 4 (falling edge due to negative logic), latch bumpMask6 in ISR, and prioritise it in Control_Update. 
+Implement line sensor normalisation and line position estimation (0..7000 or TI’s ±33.4 mm mapping), and expose lineMask, linePos, lineErr. 
+Add ultrasonic driver for two HC‑SR04 with:
+5 V supply, echo level shifting (MSP432 not 5 V tolerant) 
+alternated triggering with ≥60 ms cycle 
+Add Sharp conversion (or calibrated LUT) for centre/left/right IR; TI lab provides the conversion framework and max distance handling. 
+Add optional IMU (I²C P6.4/P6.5) with a lightweight filter (e.g., Madgwick) and compute pitch. 
+Implement FSM states exactly as charted; keep all tuning constants in robot_config.h and expose diagnostics in CCS watch.
+Validate each classifier with persistence counters before enabling full autonomy.
+Per‑state test procedures (what to run and what “pass” looks like)
+CALIBRATE
+
+Setup: move robot slowly over white and black surfaces.
+Watch: qtrNorm[0..7] spans a wide range; qtrHealthMask indicates all good.
+Pass: no channel has tiny span; lineMask behaves sensibly on tape.
+FOLLOW_LINE
+
+Setup: straight line then gentle curve.
+Watch: state==FOLLOW_LINE, lineErr stays bounded; duty commands symmetrical on straight.
+Pass: no persistent oscillation; fast tier only when centred.
+INTERSECTION_LOCK
+
+Setup: cross intersection and T‑junction.
+Watch: intersectConf reaches threshold; lockRemainingMs counts down; steering is clamped.
+Pass: robot exits on the intended straight continuation without hooking a branch. (Use your competition’s rule policy here.) 
+GAP_BRIDGE
+
+Setup: insert a 10 cm gap on a straight segment.
+Watch: gapConf triggers; robot drives straight; reacquires within GAP_MAX_MS.
+Pass: no full recovery search unless gap exceeds spec. 
+RAMP_TRAVERSE
+
+Setup: ramp up/down with line present.
+Watch: pitch_deg, rampConf, speed reduction, line following remains active.
+Pass: robot does not trigger obstacle bypass from ramp alone; still reacts to real obstacle if confirmed. 
+OBSTACLE_APPROACH_CONFIRM
+
+Setup: place obstacle ahead of robot near the line.
+Watch: obsConf accumulates based on US+IR; only confirms after persistence.
+Pass: no single‑sample false detours.
+EMERGENCY_BUMP
+
+Setup: press each bump region (left/centre/right).
+Watch: bumpLatched, bumpZone, stop + backoff.
+Pass: immediate stop every time; transitions into bypass.
+OBSTACLE_BYPASS + LINE_REACQUIRE_GATED
+
+Setup: obstacle on line; require bypass and rejoin.
+Watch: avoidStep, yawDelta, lineAcceptRejectReason.
+Pass: robot reacquires the forward continuation of the line; rejects reacquiring the backward line segment when facing ~180° from entry heading.
+RECOVER_SEARCH and FAILSAFE_STOP
+
+Setup: remove line entirely or force unrecoverable situation.
+Watch: recovery timer; transition to failsafe.
+Pass: robot stops safely and does not spin indefinitely.

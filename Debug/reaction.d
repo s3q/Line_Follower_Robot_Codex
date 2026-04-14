@@ -1,0 +1,12 @@
+# FIXED
+
+reaction.o: ../reaction.c ../reaction.h ../collision.h ../motor.h \
+ ../robot_config.h
+
+../reaction.h:
+
+../collision.h:
+
+../motor.h:
+
+../robot_config.h:

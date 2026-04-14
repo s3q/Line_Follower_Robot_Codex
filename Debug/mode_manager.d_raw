@@ -1,0 +1,12 @@
+mode_manager.o: ../mode_manager.c ../mode_manager.h ../control.h \
+ ../zone_detector.h ../mission_config.h ../robot_config.h
+
+../mode_manager.h:
+
+../control.h:
+
+../zone_detector.h:
+
+../mission_config.h:
+
+../robot_config.h:

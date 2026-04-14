@@ -1,0 +1,21 @@
+# FIXED
+
+line_follow.o: ../line_follow.c ../line_follow.h ../line_follow_mode.h \
+ ../avoid.h ../ir.h ../line.h ../motor.h ../robot_config.h \
+ ../ultrasonic.h
+
+../line_follow.h:
+
+../line_follow_mode.h:
+
+../avoid.h:
+
+../ir.h:
+
+../line.h:
+
+../motor.h:
+
+../robot_config.h:
+
+../ultrasonic.h:

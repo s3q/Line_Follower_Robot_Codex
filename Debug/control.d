@@ -1,0 +1,7 @@
+# FIXED
+
+control.o: ../control.c ../control.h ../mission.h
+
+../control.h:
+
+../mission.h:

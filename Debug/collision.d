@@ -1,0 +1,5 @@
+# FIXED
+
+collision.o: ../collision.c ../collision.h
+
+../collision.h:
