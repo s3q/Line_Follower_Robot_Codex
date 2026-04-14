@@ -224,6 +224,13 @@ ControlState ModeManager_DecideMode(
         return current;
     }
 
+    if ((current == CONTROL_STATE_OBSTACLE_AVOID) &&
+        (obstacleTrigger == 0U) &&
+        (MISSION_EN_OBSTACLE_AVOID != 0U) &&
+        (MISSION_EN_LINE_FOLLOW == 0U)) {
+        return current;
+    }
+
     if ((torqueTrigger != 0U) && (MISSION_EN_TORQUE_RAMP != 0U)) {
         requested = CONTROL_STATE_TORQUE_RAMP;
     } else if ((obstacleTrigger != 0U) && (MISSION_EN_OBSTACLE_AVOID != 0U)) {

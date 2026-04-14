@@ -8,6 +8,7 @@
 #include "mission_config.h"
 #include "mode_manager.h"
 #include "motor.h"
+#include "mpu6500.h"
 #include "reaction.h"
 #include "zone_detector.h"
 
@@ -52,6 +53,7 @@ static void Mission_UpdateLineFollow(void);
 static void Mission_UpdateObstacleAvoid(void);
 static void Mission_UpdateTorqueRamp(void);
 static void Mission_UpdateStop(void);
+static void Mission_UpdateImuInputs(void);
 
 static int Mission_AbsI(int value)
 {
@@ -90,6 +92,27 @@ static uint16_t Mission_ClampDuty(int32_t duty)
         return ROBOT_CFG_LINE_DUTY_FAST;
     }
     return (uint16_t)duty;
+}
+
+static void Mission_UpdateImuInputs(void)
+{
+#if ENABLE_MPU6500_FEATURE
+    Mpu6500_Update();
+
+    if ((gMpu6500Present != 0U) && (gMpu6500Fault == 0U)) {
+        gLineFollowPitchInputDeg = gMpu6500PitchDeg;
+        gAvoidYawInputDeg = gMpu6500YawDeltaDeg;
+        gAvoidYawInputFresh = 1U;
+    } else {
+        gLineFollowPitchInputDeg = 0;
+        gAvoidYawInputDeg = 0;
+        gAvoidYawInputFresh = 0U;
+    }
+#else
+    gLineFollowPitchInputDeg = 0;
+    gAvoidYawInputDeg = 0;
+    gAvoidYawInputFresh = 0U;
+#endif
 }
 
 static void Mission_SetTorquePhase(MissionTorquePhase phase)
@@ -435,6 +458,13 @@ void Mission_Init(void)
     Emergency_Init();
     ZoneDetector_Init();
     ModeManager_Init();
+#if ENABLE_MPU6500_FEATURE
+    Mpu6500_Init();
+    if ((gMpu6500Present != 0U) && (gMpu6500Fault == 0U)) {
+        Mpu6500_ResetYawDelta();
+    }
+#endif
+    Mission_UpdateImuInputs();
 
     Mission_EnterMode(ModeManager_BootMode());
     gMissionInitDone = 1U;
@@ -468,6 +498,7 @@ void Mission_Update(void)
     if (gMissionProgressTicks < 0xFFFFFFFFU) {
         gMissionProgressTicks++;
     }
+    Mission_UpdateImuInputs();
     ModeManager_Tick();
 
     zoneDecision.zone = ZONE_UNKNOWN;

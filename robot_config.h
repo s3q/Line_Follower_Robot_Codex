@@ -262,8 +262,13 @@
 #define ROBOT_MODE_DEMO                           1U
 #define ROBOT_CFG_APP_MODE_CALIBRATION            0U
 #define ROBOT_CFG_APP_MODE                        ROBOT_MODE_NORMAL
+#define ROBOT_CFG_RUN_STARTUP_CALIBRATION         0U
 #define ROBOT_CFG_MAIN_CONTROL_LOOP_MS            10U
 #define ROBOT_CFG_MAIN_CAL_WATCH_UPDATE_MS        100U
+
+#ifndef ROBOT_CFG_IR_BUSY_TIMEOUT_LOOPS
+#define ROBOT_CFG_IR_BUSY_TIMEOUT_LOOPS       60000U
+#endif
 
 /*
  * MPU6500 tuning

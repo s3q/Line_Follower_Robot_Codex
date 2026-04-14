@@ -1,4 +1,5 @@
 #include "ir.h"
+#include "robot_config.h"
 #include "robot_pins.h"
 #include <ti/devices/msp432p4xx/driverlib/driverlib.h>
 
@@ -23,8 +24,15 @@ void IR_Init(void)
 
 uint16_t IR_ReadRaw(void)
 {
+    uint32_t timeout;
+
     ADC14_toggleConversionTrigger();
+    timeout = ROBOT_CFG_IR_BUSY_TIMEOUT_LOOPS;
     while (ADC14_isBusy()) {
+        if (timeout == 0U) {
+            return 0U;
+        }
+        timeout--;
     }
     return (uint16_t)ADC14_getResult(ADC_MEM0);
 }

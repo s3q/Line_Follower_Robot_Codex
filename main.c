@@ -172,7 +172,9 @@ int main(void)
     }
 #else
     Calibration_Init();
+#if ROBOT_CFG_RUN_STARTUP_CALIBRATION
     Calibration_Run();
+#endif
 #if ROBOT_CFG_APP_MODE == ROBOT_MODE_DEMO
     Control_Init();
     Demo_Init();

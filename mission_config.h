@@ -13,7 +13,7 @@
 #define PROFILE_SEQUENCE_NO_COLOR   5U
 
 #ifndef MISSION_ACTIVE_PROFILE
-#define MISSION_ACTIVE_PROFILE PROFILE_FULL_COLOR
+#define MISSION_ACTIVE_PROFILE PROFILE_SEQUENCE_NO_COLOR
 #endif
 
 /*
@@ -21,7 +21,7 @@
  * 0 = fallback switching (pitch->torque, obstacle->avoid, else line follow).
  */
 #ifndef USE_COLOR_ZONES
-#define USE_COLOR_ZONES                     1U
+#define USE_COLOR_ZONES                     0U
 #endif
 
 /*

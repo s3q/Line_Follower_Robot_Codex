@@ -1,6 +1,6 @@
 # FIXED
 
-ir.o: ../ir.c ../ir.h ../robot_pins.h \
+ir.o: ../ir.c ../ir.h ../robot_config.h ../robot_pins.h \
  C:/ti/simplelink_msp432p4_sdk_3_40_01_02/source/ti/devices/msp432p4xx/driverlib/driverlib.h \
  C:/ti/simplelink_msp432p4_sdk_3_40_01_02/source/ti/devices/msp432p4xx/driverlib/adc14.h \
  C:/ti/simplelink_msp432p4_sdk_3_40_01_02/source/ti/devices/msp432p4xx/inc/msp.h \
@@ -43,6 +43,8 @@ ir.o: ../ir.c ../ir.h ../robot_pins.h \
  C:/ti/simplelink_msp432p4_sdk_3_40_01_02/source/ti/devices/msp432p4xx/driverlib/flash.h
 
 ../ir.h:
+
+../robot_config.h:
 
 ../robot_pins.h:
 
